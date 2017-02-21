@@ -38,6 +38,11 @@
 #include <sys/time.h>
 
 #include <ext4.h>
+#include <ext4_block_group.h>
+#include <ext4_bitmap.h>
+#include <ext4_fs.h>
+#include <ext4_super.h>
+#include <ext4_trans.h>
 #include "../blockdev/linux/ext4_filedev.h"
 #include "../blockdev/windows/io_raw.h"
 #include "common/test_lwext4.h"
@@ -229,40 +234,67 @@ int main(int argc, char **argv)
 	if (verbose)
 		ext4_dmask_set(DEBUG_ALL);
 
-	if (!test_lwext4_mount(bd, bc))
-		return EXIT_FAILURE;
+    if (!test_lwext4_mount(bd, bc))
+        return EXIT_FAILURE;
 
-	test_lwext4_cleanup();
+    test_lwext4_cleanup();
 
-	if (sbstat)
-		test_lwext4_mp_stats();
 
-	test_lwext4_dir_ls("/mp/");
-	fflush(stdout);
-	if (!test_lwext4_dir_test(dir_cnt))
-		return EXIT_FAILURE;
+    uint32_t bg_count = ext4_block_group_cnt(&bd->fs->sb);
+    for (int i = 0; i < bg_count; ++i)
+    {
+        printf("Check block group id %d\n", i);
+        struct ext4_block_group_ref ref;
+        int r = ext4_fs_get_block_group_ref(bd->fs, i, &ref);
+        if (r != EOK)
+        {
+            printf("failed to get block group ref");
+            continue;
+        }
 
-	fflush(stdout);
-	uint8_t *rw_buff = malloc(rw_szie);
-	if (!rw_buff) {
-		free(rw_buff);
-		return EXIT_FAILURE;
-	}
-	if (!test_lwext4_file_test(rw_buff, rw_szie, rw_count)) {
-		free(rw_buff);
-		return EXIT_FAILURE;
-	}
+        uint32_t block_size = ext4_sb_get_block_size(&bd->fs->sb);
+        uint64_t block_bitmap_address = ext4_bg_get_block_bitmap(ref.block_group, &bd->fs->sb);
+        uint64_t inode_bitmap_address = ext4_bg_get_inode_bitmap(ref.block_group, &bd->fs->sb);
+        uint64_t inode_unused = ext4_bg_get_itable_unused(ref.block_group, &bd->fs->sb);
 
-	free(rw_buff);
+        struct ext4_block bitmap_block;
+        r = ext4_trans_block_get(bd->fs->bdev, &bitmap_block, block_bitmap_address);
+        if (r != EOK)
+        {
+            printf("failed to get block bitmap\n");
+            continue;
+        }
 
-	fflush(stdout);
-	test_lwext4_dir_ls("/mp/");
+        int32_t free_blocks = 0;
+        for (uint32_t block = 0; block < 8 * block_size; ++block)
+        {
+            if (ext4_bmap_is_bit_clr(bitmap_block.data, block))
+            {
+                // block is "logical block address of free block"
+                free_blocks++;
+            }
+        }
 
-	if (sbstat)
-		test_lwext4_mp_stats();
+        r = ext4_trans_block_get(bd->fs->bdev, &bitmap_block, inode_bitmap_address);
+        if (r != EOK)
+        {
+            printf("failed to get block bitmap\n");
+            continue;
+        }
 
-	if (cleanup_flag)
-		test_lwext4_cleanup();
+        int32_t free_inodes = 0;
+        for (uint32_t block = 0; block < 8 * block_size; ++block)
+        {
+            if (ext4_bmap_is_bit_clr(bitmap_block.data, block))
+            {
+                // block is "logical block address of free block"
+                free_inodes++;
+            }
+        }
+        uint32_t unused_inodes = inode_unused;
+        printf("bgi %d : %d free blocks, %d free inodes, %d unused inodes\n", i,
+               free_blocks, free_inodes, unused_inodes);
+    }
 
 	if (bstat)
 		test_lwext4_block_stats();
